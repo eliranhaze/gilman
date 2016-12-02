@@ -21,19 +21,28 @@ def build_path(url):
     url = re.sub('[^\w\s-]', '', url)
     return '%s/%s' % (cache_dir, url)
 
-def get_from_cache(url):
+def is_cached(url):
     path = build_path(url)
     if os.path.exists(path):
         age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(path))
         if age < cache_max_age:
-            with open(path) as cached:
-                return cached.read()
+            return True
+    return False
+
+def get_from_cache(url):
+    if is_cached(url):
+        path = build_path(url)
+        with open(path) as cached:
+            return cached.read()
 
 def cache(url, content):
     path = build_path(url)
     with open(path, 'w') as out:
        out.write(content)
- 
+
+def cached_pct(urls):
+    return sum(1. for u in urls if is_cached(u))/len(urls)
+
 #######################################################################
 
 def _is_valid_url(url):

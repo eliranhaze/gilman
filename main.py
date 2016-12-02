@@ -1,6 +1,5 @@
 import re
 import readline
-import requests
 import sys
 import time
 
@@ -8,9 +7,7 @@ from bs4 import BeautifulSoup as bsoup
 from threading import Thread, RLock
 from Queue import Queue, Empty
 
-from fetch import fetch
-
-s = requests.Session()
+from fetch import fetch, cached_pct
 
 def split_in_n(x, n):
     return [x[i:i+n] for i in range(0, len(x), n)]
@@ -28,9 +25,11 @@ def get_deps():
 
 class Gilman(object):
 
+    MAX_THREADS = 32
+
     def __init__(self):
         self.all_data = []
-        self.concurrent = 50
+        self.concurrent = 64
         self.q = Queue()
         self.lock = RLock()
         self.url_count = 0
@@ -39,20 +38,25 @@ class Gilman(object):
 
     def run(self):
         try:
-            print 'getting data...'
-            t1 = time.time()
+            self.init()
+            print 'getting data (%.0f%% cached, %d threads)' % (self.cached_pct*100, self.concurrent)
             self.start()
             self.join()
-            print 'got %d data in %.1fms' % (len(self.all_data), (time.time()-t1)*1000.)
         except KeyboardInterrupt:
             print
             print 'exiting'
             sys.exit(1)
 
-    def start(self):
+    def init(self):
         # populate the q first, since the tasks use get_nowait
+        urls = []
         for url in self.gen_urls():
             self.q.put(url)
+            urls.append(url)
+        self.cached_pct = cached_pct(urls)
+        self.concurrent = self.MAX_THREADS - int(((self.MAX_THREADS - 1) * self.cached_pct))
+
+    def start(self):
         for _ in xrange(self.concurrent):
             t = Thread(target=self.task)
             t.daemon = True
@@ -64,11 +68,10 @@ class Gilman(object):
             time.sleep(0.1)
     
     def gen_urls(self):
-        year = '2016' 
         deps = get_deps()
         self.url_count = len(deps)
         for dep in deps:
-            yield 'http://www2.tau.ac.il/yedion/syllabus/?deployment=10&dep=%s&year=%s' % (dep, year)
+            yield 'http://www2.tau.ac.il/yedion/syllabus/?deployment=10&dep=%s' % dep
    
     def get_from_q(self):
         try:
@@ -85,7 +88,7 @@ class Gilman(object):
             self.parse(response)
             with self.lock:
                 self.read_count += 1
-                sys.stdout.write('reading data... %d/%d           \r' % (self.read_count, self.url_count))
+                sys.stdout.write('fetching %d/%d pages        \r' % (self.read_count, self.url_count))
                 sys.stdout.flush()
             self.q.task_done()
     
@@ -123,6 +126,8 @@ class Gilman(object):
 
 #############################################################################
 
+all_hours = range(7,21)
+
 def normalize_hours(hours):
     # e.g. 1630,1800 -> 16,17; 1600,1830 -> 16,17,18
     hours = sorted(hours)
@@ -131,6 +136,9 @@ def normalize_hours(hours):
     if hours[1][2:] == '00':
         h2 -= 1
     return range(h1, h2+1)
+
+def nice_hour(h):
+    return '%02d:00' % h
 
 def process(data):
     # all rooms: building -> room
@@ -141,8 +149,10 @@ def process(data):
     all_data = {}
     for d in data:
         day_data = all_data.setdefault(d['building'], {}).setdefault(d['semester'], {}).setdefault(d['day'], {})
-        for h in  normalize_hours(d['hours']):
-            day_data.setdefault(h, []).append(d['room'])
+        for h in all_hours:
+            day_data.setdefault(h, [])
+        for h in normalize_hours(d['hours']):
+            day_data[h].append(d['room'])
     return all_rooms, all_data
 
 def interact(rooms, data):
@@ -154,12 +164,19 @@ def interact(rooms, data):
             if semester:
                 day = print_and_select_from_list('select day', sorted(data[building][semester].keys()))
                 if day:
-                    hour = print_and_select_from_list('select hour', sorted(data[building][semester][day].keys()))
+                    hours_list = [h for h in sorted(data[building][semester][day].iterkeys())]
+                    hour = print_and_select_from_list('select hour', hours_list)
                     if hour:
-                        occupied = data[building][semester][day][hour]
-                        free = [r for r in rooms[building] if r not in occupied]
-                        print 'occupied: %s' % occupied
-                        print 'free: %s' % free
+                        occupied = data.get(building, {}).get(semester, {}).get(day, {}).get(hour, {})
+                        free = sorted([r for r in rooms[building] if r not in occupied])
+                        print '---'
+                        print 'free rooms in %s at %s, %s:' % (building, nice_hour(hour), day)
+                        print '---'
+                        for f in free:
+                            print f
+                        print '---'
+                        if not yesno('continue?'):
+                            break
 
 ###############################################################################
 # Utils
@@ -206,10 +223,23 @@ def read_input(msg):
         exit()
     return inp
 
+def yesno(msg):
+    inp = None
+    y = ['y', 'yes', 'yy', 'yyy', 'ye', 'yea', 'yeah', '']
+    n = ['n', 'no', 'nn', 'nnn','nah', 'nope', 'sorry']
+    while inp not in y + n:
+        inp = raw_input(msg + ' ([y]/n) ').lower()
+        if inp == QUIT_STRING:
+            exit()
+    return inp in y
+
 if __name__ == '__main__':
     try:
         g = Gilman()
+        t1 = time.time()
         g.run()
+        print
+        print 'got data in %.2fs' % (time.time()-t1)
         rooms, data = process(g.all_data)
         interact(rooms, data)
     except KeyboardInterrupt:
