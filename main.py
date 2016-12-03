@@ -216,7 +216,7 @@ def select_from_list(msg, lst):
             print 'Out of range.'
 
 def read_input(msg):
-    inp = raw_input(msg + ': ')
+    inp = raw_input("%s ['\q' to quit]: " % msg)
     if not inp:
         print 'Cancelled.'
     elif inp == QUIT_STRING:
