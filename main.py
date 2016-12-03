@@ -29,7 +29,6 @@ class Gilman(object):
 
     def __init__(self):
         self.all_data = []
-        self.concurrent = 64
         self.q = Queue()
         self.lock = RLock()
         self.url_count = 0
@@ -110,10 +109,10 @@ class Gilman(object):
                         is_schedule = True
                         break 
             if is_schedule and len(tds) > 6:
-                building = tds[2].text.strip()
+                building = get_heb(tds[2].text)
                 room = tds[3].text.strip()
-                day = tds[4].text.strip()
-                semester = tds[6].text.strip()
+                day = get_heb(tds[4].text)
+                semester = get_heb(tds[6].text)
                 if building and room:
                     data.append(dict(
                         building = building,
@@ -125,6 +124,12 @@ class Gilman(object):
         self.update_data(data)
 
 #############################################################################
+
+def get_heb(s):
+    return s.strip()[::-1]
+
+def sorted_heb(slist):
+    return sorted(slist, key=lambda s: s[::-1])
 
 all_hours = range(7,21)
 
@@ -158,14 +163,14 @@ def process(data):
 def interact(rooms, data):
     print '%d rooms in %d buildings' % (sum(len(v) for v in rooms.itervalues()), len(rooms))
     while True:
-        building = print_and_select_from_list('select building', sorted(data.keys()))
+        building = print_and_select_from_list('select building', sorted_heb(data.keys()))
         if building:
-            semester = print_and_select_from_list('select semester', sorted(data[building].keys()))
+            semester = print_and_select_from_list('select semester', sorted_heb(data[building].keys()))
             if semester:
-                day = print_and_select_from_list('select day', sorted(data[building][semester].keys()))
+                day = print_and_select_from_list('select day', sorted_heb(data[building][semester].keys()))
                 if day:
                     hours_list = [h for h in sorted(data[building][semester][day].iterkeys())]
-                    hour = print_and_select_from_list('select hour', hours_list)
+                    hour = print_and_select_from_list('select hour', hours_list, printer=nice_hour)
                     if hour:
                         occupied = data.get(building, {}).get(semester, {}).get(day, {}).get(hour, {})
                         free = sorted([r for r in rooms[building] if r not in occupied])
@@ -183,14 +188,15 @@ def interact(rooms, data):
 
 QUIT_STRING = '\\q'
 
-def print_and_select_from_list(msg, lst):
-    print_list(lst)
+def print_and_select_from_list(msg, lst, printer=None):
+    print_list(lst, printer)
     return select_from_list(msg, lst)
 
-def print_list(lst):
+def print_list(lst, printer=None):
     i = 1
     for item in lst:
-        print_item(i, unicode(item))
+        item_str = printer(item) if printer else item
+        print_item(i, item_str)
         i += 1
 
 def print_item(i, item):
