@@ -1,135 +1,104 @@
+# -*- coding: utf-8 -*-
+import os
+import cPickle as pkl
 import re
 import readline
+import requests
 import sys
 import time
 
 from bs4 import BeautifulSoup as bsoup
+from collections import OrderedDict
 from threading import Thread, RLock
 from Queue import Queue, Empty
 
-from fetch import fetch, cached_pct
+from fetch import fetch
 
-def split_in_n(x, n):
-    return [x[i:i+n] for i in range(0, len(x), n)]
+###################################################################################
+# constants
 
-def get_deps():
-    soup = bsoup(fetch('http://www20.tau.ac.il/yedion/yedion.html'))
-    deps = []
-    for option in soup.findAll('option'):
-        value = option.get('value')
-        if value:
-            deps.extend([d for d in split_in_n(value, 4) if len(d) == 4])
-    return list(set(deps))
+HOURS = {
+    (7,8,9): 1,
+    (10,11): 2,
+    (12,13): 3,
+    (14,15): 4,
+    (16,17): 5,
+    (18,19): 6,
+}
 
-#############################################
+DAYS = {
+    u'א': 1,
+    u'ב': 2,
+    u'ג': 3,
+    u'ד': 4,
+    u'ה': 5,
+    u'ו': 6,
+}
 
-class Gilman(object):
+SEMESTERS = {
+    u'א': 1,
+    u'ב': 2,
+    u'קיץ': 3,
+}
 
-    MAX_THREADS = 32
+###################################################################################
+# requests
 
-    def __init__(self):
-        self.all_data = []
-        self.q = Queue()
-        self.lock = RLock()
-        self.url_count = 0
-        self.read_count = 0
-        self.processing = False
+def gen_request_data(semester, day, hour):
+    data = OrderedDict([
+        ('MfcISAPICommand', 'but'),
+        ('year',''),
+        ('semester',semester),
+        ('hour',hour),
+        ('yom',day),
+        ('department1','08'), # all art
+        ('department2','05'), # all engineering
+        ('department3','10'), # all social
+        ('department4','04'), # all life
+        ('department5','06'), # all humanities
+        ('department6','03'), # all exact
+        ('department7','14'), # all law
+        ('course_nam',''),
+        ('teach_nam',''),
+        ('department8','12'), # all management
+        ('department9','01'), # all medicine
+        ('department10','11'), # social work (others needed)
+        ('department11','21712172'), # english + foreign languages
+        ('department12','188018821883'), # all whatever this is
+        ('department13','1843'), # all cyber
+    ])
+    if not semester:
+        data.pop('semester')
+    if not day:
+        data.pop('yom')
+    if not hour:
+        data.pop('hour')
+    yield data
+    # clear deps 
+    for key in data.keys():
+        if key.startswith('department'):
+            data[key] = ''
+    additional_dep10 = ['11', '07', '09', '15']
+    for dep10 in additional_dep10:
+        data['department10'] = dep10
+        yield data
 
-    def run(self):
-        try:
-            self.init()
-            print 'getting data (%.0f%% cached, %d threads)' % (self.cached_pct*100, self.concurrent)
-            self.start()
-            self.join()
-        except KeyboardInterrupt:
-            print
-            print 'exiting'
-            sys.exit(1)
+def make_request(data, func):
+    return fetch('http://yedion.tau.ac.il/yed/yednew.dll', data=data, post=True, processor=func)
 
-    def init(self):
-        # populate the q first, since the tasks use get_nowait
-        urls = []
-        for url in self.gen_urls():
-            self.q.put(url)
-            urls.append(url)
-        self.cached_pct = cached_pct(urls)
-        self.concurrent = self.MAX_THREADS - int(((self.MAX_THREADS - 1) * self.cached_pct))
+def get_data(semester, day, hour):
+    all_data = []
+    for data in gen_request_data(semester=semester, day=day, hour=hour):
+        content = make_request(data, minify)
+        all_data.extend(parse(content))
+    return process(all_data)
 
-    def start(self):
-        for _ in xrange(self.concurrent):
-            t = Thread(target=self.task)
-            t.daemon = True
-            t.start()
-
-    def join(self):
-        # wait for the q to empty (not using join since it cannot be interrupted)
-        while self.read_count < self.url_count:
-            time.sleep(0.1)
-    
-    def gen_urls(self):
-        deps = get_deps()
-        self.url_count = len(deps)
-        for dep in deps:
-            yield 'http://www2.tau.ac.il/yedion/syllabus/?deployment=10&dep=%s' % dep
-   
-    def get_from_q(self):
-        try:
-            return self.q.get_nowait()
-        except Empty:
-            pass
- 
-    def task(self):
-        while True:
-            url = self.get_from_q()
-            if url is None:
-                return
-            response = fetch(url)
-            self.parse(response)
-            with self.lock:
-                self.read_count += 1
-                sys.stdout.write('fetching %d/%d pages        \r' % (self.read_count, self.url_count))
-                sys.stdout.flush()
-            self.q.task_done()
-    
-    def update_data(self, data):
-        with self.lock:
-            self.all_data.extend(data)
-   
-    def parse(self, response):
-        data = []
-        soup = bsoup(response) 
-        for tr in soup.findAll('tr'):
-            is_schedule = False
-            tds = tr.findAll('td')
-            for td in tds:
-                match = re.search('\d{4}-\d{4}', td.text)
-                if match:
-                    hours = match.group().split('-')
-                    if all('0700' < h < '2100' for h in hours):
-                        is_schedule = True
-                        break 
-            if is_schedule and len(tds) > 6:
-                building = get_heb(tds[2].text)
-                room = tds[3].text.strip()
-                day = get_heb(tds[4].text)
-                semester = get_heb(tds[6].text)
-                if building and room:
-                    data.append(dict(
-                        building = building,
-                        room = room,
-                        day = day,
-                        hours = hours,
-                        semester = semester,
-                    ))
-        self.update_data(data)
-
-#############################################################################
-
-def get_heb(s):
-    return s.strip()[::-1]
-
-def sorted_heb(slist):
-    return sorted(slist, key=lambda s: s[::-1])
+def process(data):
+    # all rooms: building -> room
+    all_rooms = {}
+    for d in data:
+        all_rooms.setdefault(d['building'], set()).add(d['room'])
+    return all_rooms
 
 all_hours = range(7,21)
 
@@ -142,55 +111,130 @@ def normalize_hours(hours):
         h2 -= 1
     return range(h1, h2+1)
 
+###################################################################################
+# parsing
+
+def parse(response):
+    data = []
+    soup = bsoup(response) 
+    for tr in soup.findAll('tr'):
+        tds = tr.findAll('td')
+        hours = hours_from_schedule_row(tds)
+        if hours:
+            parsed = parse_schedule_row(tds, hours)
+            if parsed:
+                data.append(parsed)
+    return data
+
+def hours_from_schedule_row(td_list):
+    for td in td_list:
+        match = re.search('\d{4} *- *\d{4}', td.text)
+        if match:
+            hours = [h.strip() for h in match.group().split('-')]
+            if all('0700' < h < '2100' for h in hours):
+                return hours
+
+def parse_schedule_row(td_list, hours):
+    if len(td_list) > 4:
+        building = get_heb(td_list[4].text)
+        room = td_list[3].text.strip()
+        day = get_heb(td_list[2].text)
+        semester = get_heb(td_list[0].text)
+        if building and room:
+            return dict(
+                building = building,
+                room = room,
+                day = day,
+                hours = hours,
+                semester = semester,
+            )
+
+def minify(response):
+    response = response.replace('<A ', '<a ').replace('</A>', '</a>').replace('&nbsp;','').replace('\n','')
+    response = re.sub('<a [\s\S]*?</a>', '', response)
+    response = re.sub('<img [\s\S]*?>', '', response)
+    response = re.sub('<th [\s\S]*?</th>', '', response)
+    response = re.sub('colspan=".*?"', '', response)
+    response = re.sub('class=".*?"', '', response)
+    response = re.sub('bgcolor=".*?"', '', response)
+    response = response.replace('align="right"','').replace('dir="rtl"','').replace('align ="right"','')
+    response = response.replace('  ','')
+    return response
+
+###################################################################################
+# interaction
+
+def get_heb(s):
+    return s.strip() # not reversing - [::-1]
+
+def sorted_heb(slist):
+    return sorted(slist)#, key=lambda s: s[::-1])
+
 def nice_hour(h):
     return '%02d:00' % h
 
-def process(data):
-    # all rooms: building -> room
-    all_rooms = {}
-    for d in data:
-        all_rooms.setdefault(d['building'], set()).add(d['room'])
-    # all data: building -> sem -> day -> hour -> occupied rooms
-    all_data = {}
-    for d in data:
-        day_data = all_data.setdefault(d['building'], {}).setdefault(d['semester'], {}).setdefault(d['day'], {})
-        for h in all_hours:
-            day_data.setdefault(h, [])
-        for h in normalize_hours(d['hours']):
-            day_data[h].append(d['room'])
-    return all_rooms, all_data
+def get_all_rooms():
+    cache_path = '.allrooms'
+    if os.path.exists(cache_path):
+        return pkl.load(open(cache_path, 'rb'))
+    print 'loading rooms for the first time...'
+    rooms = get_data('', '', '')
+    pkl.dump(rooms, open(cache_path, 'wb'))
+    return rooms
 
-def interact(rooms, data):
-    print '%d rooms in %d buildings' % (sum(len(v) for v in rooms.itervalues()), len(rooms))
+def interact():
+    all_rooms = get_all_rooms()
     while True:
-        building = print_and_select_from_list('select building', sorted_heb(data.keys()))
-        if building:
-            semester = print_and_select_from_list('select semester', sorted_heb(data[building].keys()))
-            if semester:
-                day = print_and_select_from_list('select day', sorted_heb(data[building][semester].keys()))
-                if day:
-                    hours_list = [h for h in sorted(data[building][semester][day].iterkeys())]
-                    hour = print_and_select_from_list('select hour', hours_list, printer=nice_hour)
-                    if hour:
-                        occupied = data.get(building, {}).get(semester, {}).get(day, {}).get(hour, {})
-                        free = sorted([r for r in rooms[building] if r not in occupied])
-                        print '---'
-                        print 'free rooms in %s at %s, %s:' % (building, nice_hour(hour), day)
-                        print '---'
-                        for f in free:
-                            print f
-                        print '---'
-                        if not yesno('continue?'):
-                            break
+        semester = print_and_select_from_list('select semester', sorted_heb(SEMESTERS.keys()))
+        if semester:
+            day = print_and_select_from_list('select day', sorted_heb(DAYS.keys()))
+            if day:
+                hours_list = sorted([h for h_list in HOURS for h in h_list])
+                hour = print_and_select_from_list('select hour', hours_list, printer=nice_hour)
+                if hour:
+                    print 'fetching data...'
+                    occupied_rooms = get_data(
+                        semester = SEMESTERS[semester],
+                        day = DAYS[day],
+                        hour = [v for k, v in HOURS.iteritems() if hour in k][0],
+                    )
+                    free_rooms = {} # building -> rooms
+                    for building, rooms in all_rooms.iteritems():
+                        if building in occupied_rooms:
+                            for room in rooms:
+                                if room not in occupied_rooms[building]:
+                                    free_rooms.setdefault(building, []).append(room)
+                        else:
+                            free_rooms[building] = rooms.copy()
+                    final_interact(semester, day, hour, free_rooms)
+                    if not yesno('continue?'):
+                        break
 
-###############################################################################
-# Utils
+def final_interact(semester, day, hour, free_rooms):
+    while True:
+        print '---'
+        print 'buildings with available rooms at %s/%s:' % (nice_hour(hour), day)
+        print '---'
+        building = print_and_select_from_list(
+            'select building to view available rooms',
+            sorted_heb(free_rooms.keys()),
+            printer=lambda b: '%s (%d)' % (b, len(free_rooms[b]))
+        )
+        if not building:
+            return
+        print 'available rooms in %s in semester-%s, at %s/%s:' % (building, semester, nice_hour(hour), day)
+        print ','.join(sorted(list(free_rooms[building])))
+        if not yesno('view other buildings?'):
+            return
+
+###################################################################################
+# utils
 
 QUIT_STRING = '\\q'
 
 def print_and_select_from_list(msg, lst, printer=None):
     print_list(lst, printer)
-    return select_from_list(msg, lst)
+    return select_from_list(msg, lst, printer)
 
 def print_list(lst, printer=None):
     i = 1
@@ -200,9 +244,9 @@ def print_list(lst, printer=None):
         i += 1
 
 def print_item(i, item):
-    print str(i) + '. ' + item
+    print '%s. %s' % (i, item)
 
-def select_from_list(msg, lst):
+def select_from_list(msg, lst, printer=None):
     while True:
         try:
             inp = read_input(msg + ' (1-' + str(len(lst)) + ')')
@@ -213,20 +257,20 @@ def select_from_list(msg, lst):
                 raise IndexError
             selection = lst[choice]
             print '---'
-            print 'Selected:', selection
+            print 'selected:', printer(selection) if printer else selection
             print '---'
             return selection
         except ValueError:
-            print 'Invalid input.'
+            print 'invalid input'
         except IndexError:
-            print 'Out of range.'
+            print 'out of range'
 
 def read_input(msg):
-    inp = raw_input("%s ['\q' to quit]: " % msg)
+    inp = raw_input("%s: " % msg)
     if not inp:
-        print 'Cancelled.'
+        print 'cancelled.'
     elif inp == QUIT_STRING:
-        exit()
+        sys.exit(0)
     return inp
 
 def yesno(msg):
@@ -236,18 +280,12 @@ def yesno(msg):
     while inp not in y + n:
         inp = raw_input(msg + ' ([y]/n) ').lower()
         if inp == QUIT_STRING:
-            exit()
+            sys.exit(0)
     return inp in y
 
 if __name__ == '__main__':
     try:
-        g = Gilman()
-        t1 = time.time()
-        g.run()
-        print
-        print 'got data in %.2fs' % (time.time()-t1)
-        rooms, data = process(g.all_data)
-        interact(rooms, data)
+        interact()
     except KeyboardInterrupt:
         print
         print 'exiting'
