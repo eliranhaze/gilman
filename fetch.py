@@ -13,7 +13,7 @@ session.headers['User-Agent'] = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537
 # cache
 
 use_cache = True
-cache_max_age = timedelta(days=21)
+cache_max_age = timedelta(days=40)
 cache_dir = '.cache'
 metafile = '%s/%s' % (cache_dir, '.metadata')
 sep = ' # '
