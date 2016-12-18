@@ -158,7 +158,7 @@ def minify(response):
     response = re.sub('class=".*?"', '', response)
     response = re.sub('bgcolor=".*?"', '', response)
     response = response.replace('align="right"','').replace('dir="rtl"','').replace('align ="right"','')
-    response = response.replace('  ','')
+    response = response.replace('  ',' ')
     return response
 
 ###################################################################################
