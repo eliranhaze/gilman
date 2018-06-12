@@ -168,7 +168,7 @@ def get_heb(s):
     return s.strip() # not reversing - [::-1]
 
 def sorted_heb(slist):
-    return sorted(slist)#, key=lambda s: s[::-1])
+    return sorted(slist)
 
 def nice_hour(h):
     return '%02d:00' % h
